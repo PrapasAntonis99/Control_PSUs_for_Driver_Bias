@@ -1,16 +1,39 @@
+"""
+Simple code for controlling RIGOL DP800 series and Keysight B2900 series PSUs. It controls two different
+Keysight PSUs with one channel each and one RIGOL PSU with two channels. It was created for quick setting
+and fine-tuning of the bias voltages for the drivers. { Used in 2-bit CAM experiment }
+
+Parameters that need to be set:
+~ accuracy -> Amount of decimal points for setting voltages
+    exp. for accuracy = 3 we get 1V / 10^3 = 1mV, so every step will be in mV
+~ close_psu_on_gui_close -> If TRUE all PSUs close their channels when GUI closes
+~ psu_current_limit -> Maximum current for all PSUs
+~ voltage_increment -> Plus/Minus (+/-) buttons steps in voltage
+    exp. if voltage_increment = 2 every press of the buttons will be 2 steps in the scale we use
+~ psu_min_voltage -> Minimum voltage for all PSUs
+~ psu_max_voltage -> Maximum voltage for all PSUs
+~ on_off_button_size -> On/Off state button size (px)
+~ font_size -> Font size (px) for label fields
+~ psu_ips -> Add the IP of the PSUs
+"""
+
 import sys
 import time
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import pyvisa as visa
 
-psu_min_voltage = 0  # V
-psu_max_voltage = 8  # V
-psu_current_limit = 0.04  # A
-voltage_increment = 1
-accuracy = 2
-
+accuracy = 2  # voltage decimal points
 close_psu_on_gui_close = False
+
+psu_current_limit = 0.04  # A
+voltage_increment = 1  # step size
+
+psu_min_voltage = 0  # V
+psu_max_voltage = 10  # V
+
+on_off_button_size = 16  # pixels
+font_size = 16
 
 voltage_factor = pow(10, accuracy)
 
@@ -23,10 +46,10 @@ psu_ips = {
 
 # Slider Title, Minimum Value, Maximum Value, Starting Value
 sliders_info = [
-    (f'<b>Driver 1 bias: 0V</b>', psu_min_voltage, psu_max_voltage, 0),
-    (f'<b>Driver 2 bias: 0V</b>', psu_min_voltage, psu_max_voltage, 0),
-    (f'<b>Driver 3 bias: 0V</b>', psu_min_voltage, psu_max_voltage, 0),
-    (f'<b>Driver 4 bias: 0V</b>', psu_min_voltage, psu_max_voltage, 0)
+    (f'<b>Driver 1 bias: +0V</b>', psu_min_voltage, psu_max_voltage, 0),
+    (f'<b>Driver 2 bias: +0V</b>', psu_min_voltage, psu_max_voltage, 0),
+    (f'<b>Driver 3 bias: +0V</b>', psu_min_voltage, psu_max_voltage, 0),
+    (f'<b>Driver 4 bias: +0V</b>', psu_min_voltage, psu_max_voltage, 0)
 ]
 
 rm = visa.ResourceManager()
@@ -36,7 +59,7 @@ PSU_2 = rm.open_resource(f'TCPIP0::{psu_ips[2]["ip_address"]}::inst0::INSTR')
 PSU_3 = rm.open_resource(f'TCPIP0::{psu_ips[4]["ip_address"]}::inst0::INSTR')
 
 
-def get_correct_PSU(psu_id):
+def get_correct_psu(psu_id):
     PSU = None
     if psu_id == 1:
         PSU = PSU_1
@@ -48,7 +71,7 @@ def get_correct_PSU(psu_id):
 
 
 def initialize_psu(psu_id, value):
-    PSU = get_correct_PSU(psu_id)
+    PSU = get_correct_psu(psu_id)
 
     if psu_ips[psu_id]['model'] == 'keysight':
         PSU.write(':SOUR:FUNC:MODE VOLT')
@@ -65,26 +88,21 @@ def initialize_psu(psu_id, value):
 
 
 def control_psu(psu_id, value, reverse_bias):
-    PSU = get_correct_PSU(psu_id)
+    PSU = get_correct_psu(psu_id)
 
     if psu_ips[psu_id]['model'] == 'keysight':
         if value == 0:
             PSU.write(f':SOUR:VOLT 0')
-            PSU.write(':OUTP OFF')
         else:
             if reverse_bias:
                 PSU.write(f':SOUR:VOLT -{value / voltage_factor}')
-                PSU.write(':OUTP ON')
             else:
                 PSU.write(f':SOUR:VOLT {value / voltage_factor}')
-                PSU.write(':OUTP ON')
     else:
         if value == 0:
             PSU.write(f'SOUR{psu_ips[psu_id]["channel"]}:VOLT 0')
-            PSU.write(f':OUTP CH{psu_ips[psu_id]["channel"]}, OFF')
         else:
             PSU.write(f'SOUR{psu_ips[psu_id]["channel"]}:VOLT {value / voltage_factor}')
-            PSU.write(f':OUTP CH{psu_ips[psu_id]["channel"]}, ON')
 
 
 class AppInterface(QWidget):
@@ -92,6 +110,8 @@ class AppInterface(QWidget):
         super().__init__()
 
         # Initialize parameters
+        self.on_off_buttons = None
+        self.psu_on_off_state = None
         self.slider_labels = None
         self.reverse_checkboxes = None
         self.sliders = None
@@ -103,6 +123,8 @@ class AppInterface(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        self.on_off_buttons = []
+        self.psu_on_off_state = []
         self.slider_labels = []
         self.reverse_checkboxes = []
         self.sliders = []
@@ -120,14 +142,25 @@ class AppInterface(QWidget):
         for title, min_val, max_val, init_val in sliders_info:
             slider_title_layout = QHBoxLayout()
 
+            on_off_button = QPushButton('', self)
+            on_off_button.setStyleSheet(f'background-color: gray; border-radius: {on_off_button_size // 2}px; padding: 0px;')
+            on_off_button.setFixedSize(on_off_button_size, on_off_button_size)
+            on_off_button.clicked.connect(lambda value, b_id=i: self.on_off_button_clicked(b_id))
+            slider_title_layout.addWidget(on_off_button)
+
+            on_off_button.setEnabled(False)
+            self.psu_on_off_state.append(0)
+            self.on_off_buttons.append(on_off_button)
+
             slider_label = QLabel(title, self)
+            slider_label.setStyleSheet(f'font-size: {font_size}px;')
             slider_label.setAlignment(Qt.AlignCenter)  # Align text in the center
             slider_title_layout.addWidget(slider_label)
 
             slider_label.setEnabled(False)
             self.slider_labels.append(slider_label)
 
-            checkbox = QCheckBox('Reverse Bias')
+            checkbox = QCheckBox('+/-')
             checkbox.stateChanged.connect(lambda value, s_label=slider_label, s_id=i: self.toggle_reverse_bias(s_label, s_id))
             slider_title_layout.addWidget(checkbox)
 
@@ -161,8 +194,10 @@ class AppInterface(QWidget):
 
             minus_button = QPushButton('-', self)
             minus_button.setFixedSize(40, 40)  # Square buttons
-
-            minus_button.clicked.connect(lambda value, s_label=slider_label, s_id=i, s=slider: self.update_slider_value(s_label, s_id, s.value() - voltage_increment, 'button'))
+            minus_button.clicked.connect(
+                lambda value, s_label=slider_label, s_id=i, s=slider: self.update_slider_value(s_label, s_id,
+                                                                                               s.value() - voltage_increment,
+                                                                                               'button'))
             slider_value_control_layout.addWidget(minus_button)
 
             minus_button.setEnabled(False)
@@ -178,6 +213,7 @@ class AppInterface(QWidget):
 
         # Add label and text input field
         label = QLabel(f'<b>Maximum value (Limit: {psu_max_voltage}V)</b>', self)
+        label.setStyleSheet(f'font-size: {font_size}px;')
         label.setAlignment(Qt.AlignCenter)  # Align text in the center
         limits_layout.addWidget(label)
 
@@ -196,6 +232,25 @@ class AppInterface(QWidget):
 
         self.show()
 
+    def on_off_button_clicked(self, button_id):
+        PSU = get_correct_psu(button_id)
+        if self.psu_on_off_state[button_id - 1] == 0:
+            if psu_ips[button_id]['model'] == 'keysight':
+                PSU.write(':OUTP ON')
+            else:
+                PSU.write(f':OUTP CH{psu_ips[button_id]["channel"]}, ON')
+            self.on_off_buttons[button_id - 1].setStyleSheet(
+                f'background-color: green; border-radius: {on_off_button_size // 2}px; padding: 0px;')
+            self.psu_on_off_state[button_id - 1] = 1
+        else:
+            if psu_ips[button_id]['model'] == 'keysight':
+                PSU.write(':OUTP OFF')
+            else:
+                PSU.write(f':OUTP CH{psu_ips[button_id]["channel"]}, OFF')
+            self.on_off_buttons[button_id - 1].setStyleSheet(
+                f'background-color: red; border-radius: {on_off_button_size // 2}px; padding: 0px;')
+            self.psu_on_off_state[button_id - 1] = 0
+
     def update_slider_value(self, label, slider_id, value, mode):
         if mode == 'button':
             self.sliders[slider_id - 1].setValue(value)
@@ -204,12 +259,13 @@ class AppInterface(QWidget):
         if reverse_bias:
             label.setText(f'<b>{label.text().split(":")[0]}: -{value / voltage_factor}V</b>')
         else:
-            label.setText(f'<b>{label.text().split(":")[0]}: {value / voltage_factor}V</b>')
+            label.setText(f'<b>{label.text().split(":")[0]}: +{value / voltage_factor}V</b>')
         control_psu(slider_id, value, reverse_bias)
 
     def toggle_reverse_bias(self, label, slider_id):
         psu_id = slider_id
-        PSU = get_correct_PSU(psu_id)
+        PSU = get_correct_psu(psu_id)
+        reverse_bias = self.reverse_checkboxes[slider_id - 1].isChecked()
         if psu_ips[psu_id]['model'] == 'keysight':
             PSU.write(f':SOUR:VOLT 0')
             PSU.write(':OUTP OFF')
@@ -217,7 +273,10 @@ class AppInterface(QWidget):
             PSU.write(f'SOUR{psu_ips[psu_id]["channel"]}:VOLT 0')
             PSU.write(f':OUTP CH{psu_ips[psu_id]["channel"]}, OFF')
         self.sliders[slider_id - 1].setValue(0)
-        label.setText(f'<b>{label.text().split(":")[0]}: 0V</b>')
+        if reverse_bias:
+            label.setText(f'<b>{label.text().split(":")[0]}: -0V</b>')
+        else:
+            label.setText(f'<b>{label.text().split(":")[0]}: +0V</b>')
 
     def confirm_button_clicked(self):
         timer = QTimer(self)
@@ -228,7 +287,7 @@ class AppInterface(QWidget):
             if max_value and float(max_value) <= psu_max_voltage:
                 slider.setMaximum(int(float(max_value) * voltage_factor))
                 if psu_ips[psu_id]['model'] != 'keysight':
-                    PSU = get_correct_PSU(psu_id)
+                    PSU = get_correct_psu(psu_id)
                     PSU.write(f':OUTPut:OVP:VAL CH{psu_ips[psu_id]["channel"]}, {float(max_value) + 0.1}')
                 # Change button background color to green
                 self.confirm_button.setStyleSheet('background-color: #90EE90')
@@ -236,6 +295,8 @@ class AppInterface(QWidget):
                 accept = True
             psu_id += 1
         if accept:
+            for on_off_button in self.on_off_buttons:
+                on_off_button.setEnabled(True)
             for slider_label in self.slider_labels:
                 slider_label.setEnabled(True)
             for checkbox in self.reverse_checkboxes:
